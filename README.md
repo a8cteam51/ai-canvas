@@ -56,17 +56,31 @@ Without the skills, any MCP client can still connect and write files — but a g
 
 | Tool | Does | Requires |
 |---|---|---|
-| `create-canvas` | Create a published page/post, scaffold its file set, assign the `theme` (default) or `blank` template | publish capability for the post type + `unfiltered_html` |
-| `list-canvases` | Canvases the caller can edit, with IDs, URLs, file mtimes | `edit_pages`, filtered per-post by `edit_post` |
-| `read-file` | Read one of `html` \| `css` \| `js` for a canvas | `edit_post` on the target |
-| `write-file` | Overwrite one file (2 MB cap); the outgoing contents become the file's retained previous version | `edit_post` on the target + `unfiltered_html` |
-| `rollback-file` | Swap a file with its retained previous version — one slot per file, so calling it again undoes the rollback | `edit_post` on the target + `unfiltered_html` |
-| `upload-media` | Sideload a file into the Media Library from a URL or base64 (site upload limit applies); returns image dimensions and the generated smaller sizes | `upload_files` |
-| `list-media` | Search the Media Library; results include URLs, image dimensions, and generated sizes (own uploads only without `edit_others_posts`) | `upload_files` |
+| `create-canvas` | Create a published page/post, scaffold its file set, assign the `theme` (default) or `blank` template | `edit_others_posts` + publish capability for the post type + `unfiltered_html` |
+| `list-canvases` | Canvases the caller can edit, with IDs, URLs, file mtimes | `edit_others_posts`, filtered per-post by `edit_post` |
+| `read-file` | Read one of `html` \| `css` \| `js` for a canvas | `edit_others_posts` + `edit_post` on the target |
+| `write-file` | Overwrite one file (2 MB cap); the outgoing contents become the file's retained previous version. `html` writes carrying inline JavaScript are rejected | `edit_others_posts` + `edit_post` on the target + `unfiltered_html` |
+| `rollback-file` | Swap a file with its retained previous version — one slot per file, so calling it again undoes the rollback | `edit_others_posts` + `edit_post` on the target + `unfiltered_html` |
+| `upload-media` | Sideload a file into the Media Library from a URL or base64 (site upload limit applies); returns image dimensions and the generated smaller sizes | `edit_others_posts` + `upload_files` |
+| `list-media` | Search the Media Library; results include URLs, image dimensions, and generated sizes | `edit_others_posts` + `upload_files` |
 
-Writing canvas content is writing unsanitized same-origin HTML/JS, so it demands the capability WordPress already reserves for exactly that: `unfiltered_html`. In practice that means **Editor or Administrator on a single site, super admins only on multisite**, and no one when `DISALLOW_UNFILTERED_HTML` is defined. The MCP endpoint itself requires `edit_posts`, so Subscribers can't even list the tools.
+Every tool requires `edit_others_posts` — the capability that separates an Editor from an Author across core roles — and the MCP endpoint enforces it too, so **Subscribers, Contributors and Authors cannot reach the server at all**, not even to list tool names. That bar deliberately sits above `upload_files`, so the Media Library tools are never exposed to an Author-level credential.
+
+Writing canvas content is additionally writing unsanitized same-origin HTML, so it demands the capability WordPress already reserves for exactly that: `unfiltered_html`. In practice that means **Editor or Administrator on a single site, super admins only on multisite**, and no one when `DISALLOW_UNFILTERED_HTML` is defined. Because `edit_others_posts` survives on multisite where `unfiltered_html` narrows to super admins, Editors there keep the read-only tools while writes correctly do not.
 
 The tool contract has no path parameters at all — files are addressed by post ID plus a fixed enum, so the agent cannot write anywhere else on the filesystem. Permanently deleting a canvas post removes its file set (retained previous versions included); uninstalling the plugin removes all of them.
+
+Note that the Application Password itself is **not** scoped to these tools. WordPress cannot scope one: the credential you create during setup authenticates the whole REST API, so anything holding it is an Editor on that site, not a caller limited to seven tools. Treat it accordingly.
+
+### One script per page
+
+`index.html` may not carry inline JavaScript. `write-file` rejects an `html` write containing a `<script>` tag, an inline event-handler attribute (`onclick`, `onerror`, and similar), or a `javascript:` URL, and tells the agent to put the behaviour in `script.js` — which is already enqueued on every canvas page.
+
+This is a rejection gate, not a sanitizer: nothing is silently rewritten, and it does not make canvas output safe (`script.js` is still arbitrary same-origin JavaScript). What it buys is that all of a page's behaviour lives in one reviewable file. The patterns are deliberately broad, so markup that merely *looks* like inline JS — an `on…=` sequence inside an attribute value, say — is rejected too; entity-escaped samples such as `&lt;script&gt;` pass untouched.
+
+### Write log
+
+Every write and rollback appends an entry to the `_ai_canvas_write_log` post meta — timestamp, user ID, action, file, byte count, and a SHA-256 of the contents — capped at the 50 most recent, and bumps `post_modified` so the change surfaces in admin listings and in any activity log watching `save_post`. The log records metadata and hashes, not content, so it is an audit trail rather than a second undo. `ai_canvas_after_write` receives the entry as its second argument.
 
 ### Rollback semantics
 
@@ -90,9 +104,16 @@ The tool contract has no path parameters at all — files are addressed by post 
 
 ## Not in v1 (on purpose)
 
-Output sanitization, draft/preview, write history beyond the single per-file rollback slot, classic themes, an embedded chat UI, settings screens.
+Output sanitization (beyond the inline-JS rejection rule above), draft/preview, restorable write history beyond the single per-file rollback slot, classic themes, an embedded chat UI, settings screens.
 
 ## Changelog
+
+### Unreleased
+
+- Every ability, and the MCP endpoint itself, now requires `edit_others_posts`. Authors and Contributors can no longer reach the server at all; this closes Author-level access to `upload-media` and `list-media`.
+- `write-file` rejects inline JavaScript in `html` — `<script>` tags, event-handler attributes, and `javascript:` URLs. Page behaviour belongs in `script.js`.
+- Writes and rollbacks are now recorded: a capped `_ai_canvas_write_log` post meta entry (user, action, file, bytes, SHA-256) plus a `post_modified` bump. `ai_canvas_after_write` now receives that entry as a second argument.
+- `list-media` `limit` is clamped to 1–100 in both the schema and the query; a negative value previously validated and returned every attachment on the site.
 
 ### 0.2.0
 

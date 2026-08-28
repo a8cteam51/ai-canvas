@@ -92,6 +92,79 @@ class AI_Canvas_Files {
 		return $contents;
 	}
 
+	/**
+	 * Inline JavaScript is rejected in index.html. Every canvas already has
+	 * exactly one script file, enqueued automatically, and forcing all page
+	 * behaviour through it is what keeps the JS on a page reviewable in one
+	 * place instead of scattered through markup.
+	 *
+	 * This is a rejection gate, not a sanitizer: the write fails and the caller
+	 * is told where the code belongs, rather than having its markup silently
+	 * rewritten. The patterns are deliberately broad — a false positive costs
+	 * one failed call with a clear message, a false negative costs the rule.
+	 */
+	private const INLINE_JS_PATTERNS = array(
+		'#<\s*script\b#i'                                               => 'a <script> tag',
+		'#<[^>]*\son[a-z]+\s*=#i'                                       => 'an inline event handler attribute (onclick, onerror, and similar)',
+		'#\b(?:href|src|action|formaction)\s*=\s*["\']?\s*javascript:#i' => 'a javascript: URL',
+	);
+
+	/**
+	 * Describe the first inline-JS construct found, or null when the markup is
+	 * clean.
+	 */
+	private static function find_inline_js( string $contents ): ?string {
+		foreach ( self::INLINE_JS_PATTERNS as $pattern => $description ) {
+			if ( preg_match( $pattern, $contents ) ) {
+				return $description;
+			}
+		}
+		return null;
+	}
+
+	const LOG_META_KEY    = '_ai_canvas_write_log';
+	const LOG_MAX_ENTRIES = 50;
+
+	/**
+	 * Record a file change against the post so it is visible to anything that
+	 * watches WordPress rather than the filesystem. Two halves: an append-only
+	 * capped meta log carrying who/what/when plus a content hash, and a
+	 * post_modified bump — the bump is what makes admin listings and activity
+	 * loggers notice that a page changed at all.
+	 */
+	private static function record_change( int $post_id, string $file, string $action, string $contents ): void {
+		$log = get_post_meta( $post_id, self::LOG_META_KEY, true );
+		$log = is_array( $log ) ? $log : array();
+
+		$log[] = array(
+			'time'   => current_time( 'mysql', true ),
+			'user'   => get_current_user_id(),
+			'action' => $action,
+			'file'   => $file,
+			'bytes'  => strlen( $contents ),
+			'sha256' => hash( 'sha256', $contents ),
+		);
+
+		if ( count( $log ) > self::LOG_MAX_ENTRIES ) {
+			$log = array_slice( $log, - self::LOG_MAX_ENTRIES );
+		}
+		update_post_meta( $post_id, self::LOG_META_KEY, $log );
+
+		// Fires save_post, which is the signal activity logs actually watch.
+		if ( get_post( $post_id ) instanceof WP_Post ) {
+			wp_update_post( array( 'ID' => $post_id ) );
+		}
+	}
+
+	/**
+	 * The most recent recorded change for a post, for passing to consumers of
+	 * the ai_canvas_after_write action.
+	 */
+	public static function last_change( int $post_id ): array {
+		$log = get_post_meta( $post_id, self::LOG_META_KEY, true );
+		return ( is_array( $log ) && array() !== $log ) ? (array) end( $log ) : array();
+	}
+
 	public static function write( int $post_id, string $file, string $contents ): array|WP_Error {
 		$path = self::path( $post_id, $file );
 		if ( is_wp_error( $path ) ) {
@@ -99,6 +172,19 @@ class AI_Canvas_Files {
 		}
 		if ( strlen( $contents ) > self::MAX_BYTES ) {
 			return new WP_Error( 'ai_canvas_too_large', sprintf( 'File exceeds the %d byte limit.', self::MAX_BYTES ) );
+		}
+
+		if ( 'html' === $file ) {
+			$inline_js = self::find_inline_js( $contents );
+			if ( null !== $inline_js ) {
+				return new WP_Error(
+					'ai_canvas_inline_js',
+					sprintf(
+						'The html file contains %s. Canvas HTML may not carry inline JavaScript — write the behaviour to this canvas\'s js file instead, which is already enqueued on the page.',
+						$inline_js
+					)
+				);
+			}
 		}
 
 		$dir = self::dir( $post_id );
@@ -130,6 +216,8 @@ class AI_Canvas_Files {
 			@unlink( $tmp );
 			return new WP_Error( 'ai_canvas_write_failed', 'Could not write the file.' );
 		}
+
+		self::record_change( $post_id, $file, 'write', $contents );
 
 		return array(
 			'file'  => $file,
@@ -175,6 +263,8 @@ class AI_Canvas_Files {
 		if ( file_exists( $stash ) && ! rename( $stash, $prev ) ) {
 			@unlink( $stash );
 		}
+
+		self::record_change( $post_id, $file, 'rollback', (string) file_get_contents( $path ) );
 
 		return array(
 			'file'  => $file,

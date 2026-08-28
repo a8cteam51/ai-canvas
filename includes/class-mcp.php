@@ -31,9 +31,11 @@ class AI_Canvas_MCP {
 			array(),
 			array(),
 			// Transport-level gate: without it any logged-in user (Subscribers
-			// included) can enumerate tool names/descriptions. Per-tool
-			// permission callbacks still apply on top.
-			fn() => current_user_can( 'edit_posts' )
+			// included) can enumerate tool names/descriptions. Editor+ here keeps
+			// Contributors and Authors off the endpoint entirely, so the media
+			// tools are never reachable below that bar. Per-tool permission
+			// callbacks still apply on top.
+			fn() => AI_Canvas_Abilities::is_editor()
 		);
 	}
 }

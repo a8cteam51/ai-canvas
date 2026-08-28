@@ -10,10 +10,16 @@ defined( 'ABSPATH' ) || exit;
 
 class AI_Canvas_Cache {
 
-	public static function purge( int $post_id ): void {
+	/**
+	 * @param int   $post_id The canvas post.
+	 * @param array $change  The recorded change (user, action, file, bytes,
+	 *                       sha256, time), passed through to listeners so the
+	 *                       action is useful for logging and not just caching.
+	 */
+	public static function purge( int $post_id, array $change = array() ): void {
 		self::purge_batcache( get_permalink( $post_id ) );
 		self::purge_pressable_edge();
-		do_action( 'ai_canvas_after_write', $post_id );
+		do_action( 'ai_canvas_after_write', $post_id, $change );
 	}
 
 	/**

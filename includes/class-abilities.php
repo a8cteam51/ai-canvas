@@ -77,6 +77,7 @@ class AI_Canvas_Abilities {
 				'permission_callback' => function ( $input = array() ) {
 					$post_type = get_post_type_object( $input['post_type'] ?? 'page' );
 					return $post_type
+						&& self::is_editor()
 						&& current_user_can( $post_type->cap->publish_posts )
 						&& current_user_can( 'unfiltered_html' );
 				},
@@ -101,7 +102,7 @@ class AI_Canvas_Abilities {
 						),
 					),
 				),
-				'permission_callback' => fn() => current_user_can( 'edit_pages' ),
+				'permission_callback' => array( __CLASS__, 'is_editor' ),
 				'execute_callback'    => array( __CLASS__, 'list_canvases' ),
 				'meta'                => self::meta( array( 'annotations' => array( 'readonly' => true ) ) ),
 			)
@@ -131,7 +132,7 @@ class AI_Canvas_Abilities {
 			'ai-canvas/write-file',
 			array(
 				'label'               => __( 'Write canvas file', 'ai-canvas' ),
-				'description'         => __( 'Overwrite one canvas file (html = index.html, css = style.css, js = script.js) for a canvas post. The write is live immediately: index.html renders as the page body (between the theme header and footer on the theme template, alone on the blank template), style.css and script.js are enqueued on the page. The overwritten contents are retained as the file\'s single previous version for rollback-file. Max 2 MB per file.', 'ai-canvas' ),
+				'description'         => __( 'Overwrite one canvas file (html = index.html, css = style.css, js = script.js) for a canvas post. The write is live immediately: index.html renders as the page body (between the theme header and footer on the theme template, alone on the blank template), style.css and script.js are enqueued on the page. The overwritten contents are retained as the file\'s single previous version for rollback-file. Max 2 MB per file. The html file may not contain inline JavaScript — no <script> tags, event-handler attributes, or javascript: URLs; page behaviour belongs in the js file, which is enqueued automatically.', 'ai-canvas' ),
 				'category'            => 'ai-canvas',
 				'input_schema'        => array_merge_recursive(
 					self::file_input_schema(),
@@ -199,7 +200,7 @@ class AI_Canvas_Abilities {
 					),
 				),
 				'output_schema'       => self::attachment_schema(),
-				'permission_callback' => fn() => current_user_can( 'upload_files' ),
+				'permission_callback' => fn() => self::is_editor() && current_user_can( 'upload_files' ),
 				'execute_callback'    => array( __CLASS__, 'upload_media' ),
 				'meta'                => self::meta(),
 			)
@@ -218,6 +219,7 @@ class AI_Canvas_Abilities {
 						'limit'  => array(
 							'type'    => 'integer',
 							'default' => 20,
+							'minimum' => 1,
 							'maximum' => 100,
 						),
 					),
@@ -231,7 +233,7 @@ class AI_Canvas_Abilities {
 						),
 					),
 				),
-				'permission_callback' => fn() => current_user_can( 'upload_files' ),
+				'permission_callback' => fn() => self::is_editor() && current_user_can( 'upload_files' ),
 				'execute_callback'    => array( __CLASS__, 'list_media' ),
 				'meta'                => self::meta( array( 'annotations' => array( 'readonly' => true ) ) ),
 			)
@@ -298,9 +300,20 @@ class AI_Canvas_Abilities {
 		);
 	}
 
+	/**
+	 * Editor-and-above gate, applied to every ability on top of that tool's own
+	 * capability check. `edit_others_posts` is what separates an Editor from an
+	 * Author across core roles, and it still holds on multisite — unlike
+	 * `unfiltered_html`, which narrows to super admins there and so can't carry
+	 * this on its own.
+	 */
+	public static function is_editor(): bool {
+		return current_user_can( 'edit_others_posts' );
+	}
+
 	public static function can_edit_target( $input = array() ): bool {
 		$post_id = (int) ( $input['post_id'] ?? 0 );
-		return $post_id > 0 && current_user_can( 'edit_post', $post_id );
+		return self::is_editor() && $post_id > 0 && current_user_can( 'edit_post', $post_id );
 	}
 
 	/**
@@ -384,7 +397,7 @@ class AI_Canvas_Abilities {
 		}
 		$result = AI_Canvas_Files::write( $post_id, $input['file'], $input['contents'] );
 		if ( ! is_wp_error( $result ) ) {
-			AI_Canvas_Cache::purge( $post_id );
+			AI_Canvas_Cache::purge( $post_id, AI_Canvas_Files::last_change( $post_id ) );
 		}
 		return $result;
 	}
@@ -396,7 +409,7 @@ class AI_Canvas_Abilities {
 		}
 		$result = AI_Canvas_Files::rollback( $post_id, $input['file'] );
 		if ( ! is_wp_error( $result ) ) {
-			AI_Canvas_Cache::purge( $post_id );
+			AI_Canvas_Cache::purge( $post_id, AI_Canvas_Files::last_change( $post_id ) );
 		}
 		return $result;
 	}
@@ -464,11 +477,12 @@ class AI_Canvas_Abilities {
 		$args = array(
 			'post_type'      => 'attachment',
 			'post_status'    => 'inherit',
-			'posts_per_page' => min( 100, (int) ( $input['limit'] ?? 20 ) ),
+			'posts_per_page' => max( 1, min( 100, (int) ( $input['limit'] ?? 20 ) ) ),
 			's'              => $input['search'] ?? '',
 		);
-		// Mirror the admin media library: users who can't edit others' posts
-		// only see their own uploads.
+		// Backstop: the ability gate already requires edit_others_posts, so this
+		// never narrows the query today. Kept so loosening that gate can't
+		// silently expose other users' uploads.
 		if ( ! current_user_can( 'edit_others_posts' ) ) {
 			$args['author'] = get_current_user_id();
 		}
