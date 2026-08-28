@@ -1,0 +1,419 @@
+<?php
+/**
+ * The MCP tool surface, registered as core Abilities (WP 6.9+).
+ *
+ * @package Ai_Canvas
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+class AI_Canvas_Abilities {
+
+	const ABILITIES = array(
+		'ai-canvas/create-canvas',
+		'ai-canvas/list-canvases',
+		'ai-canvas/read-file',
+		'ai-canvas/write-file',
+		'ai-canvas/upload-media',
+		'ai-canvas/list-media',
+	);
+
+	public static function init(): void {
+		add_action( 'wp_abilities_api_categories_init', array( __CLASS__, 'register_category' ) );
+		add_action( 'wp_abilities_api_init', array( __CLASS__, 'register_abilities' ) );
+	}
+
+	public static function register_category(): void {
+		wp_register_ability_category(
+			'ai-canvas',
+			array(
+				'label'       => __( 'AI Canvas', 'ai-canvas' ),
+				'description' => __( 'Write per-page HTML/CSS/JS canvases and manage media.', 'ai-canvas' ),
+			)
+		);
+	}
+
+	/**
+	 * Meta shared by every ability: exposed to MCP, hidden from the abilities REST channel.
+	 */
+	private static function meta( array $extra = array() ): array {
+		return array_merge(
+			array(
+				'mcp'          => array( 'public' => true ),
+				'show_in_rest' => false,
+			),
+			$extra
+		);
+	}
+
+	public static function register_abilities(): void {
+		wp_register_ability(
+			'ai-canvas/create-canvas',
+			array(
+				'label'               => __( 'Create canvas', 'ai-canvas' ),
+				'description'         => __( 'Create a published page or post rendered as an AI canvas: the theme header and footer around an HTML/CSS/JS file set this agent can write to. Returns the new post ID needed by the file tools.', 'ai-canvas' ),
+				'category'            => 'ai-canvas',
+				'input_schema'        => array(
+					'type'       => 'object',
+					'required'   => array( 'title' ),
+					'properties' => array(
+						'title'     => array( 'type' => 'string' ),
+						'slug'      => array( 'type' => 'string' ),
+						'post_type' => array(
+							'type'    => 'string',
+							'enum'    => array( 'page', 'post' ),
+							'default' => 'page',
+						),
+					),
+				),
+				'output_schema'       => self::canvas_schema(),
+				'permission_callback' => function ( $input = array() ) {
+					$post_type = get_post_type_object( $input['post_type'] ?? 'page' );
+					return $post_type && current_user_can( $post_type->cap->publish_posts );
+				},
+				'execute_callback'    => array( __CLASS__, 'create_canvas' ),
+				'meta'                => self::meta(),
+			)
+		);
+
+		wp_register_ability(
+			'ai-canvas/list-canvases',
+			array(
+				'label'               => __( 'List canvases', 'ai-canvas' ),
+				'description'         => __( 'List all AI canvas pages/posts with their IDs, URLs, and file modification times.', 'ai-canvas' ),
+				'category'            => 'ai-canvas',
+				'input_schema'        => array( 'type' => 'object', 'properties' => (object) array() ),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'canvases' => array(
+							'type'  => 'array',
+							'items' => self::canvas_schema(),
+						),
+					),
+				),
+				'permission_callback' => fn() => current_user_can( 'edit_pages' ),
+				'execute_callback'    => array( __CLASS__, 'list_canvases' ),
+				'meta'                => self::meta( array( 'annotations' => array( 'readonly' => true ) ) ),
+			)
+		);
+
+		wp_register_ability(
+			'ai-canvas/read-file',
+			array(
+				'label'               => __( 'Read canvas file', 'ai-canvas' ),
+				'description'         => __( 'Read the current contents of a canvas file (html = index.html, css = style.css, js = script.js) for a canvas post.', 'ai-canvas' ),
+				'category'            => 'ai-canvas',
+				'input_schema'        => self::file_input_schema(),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'contents' => array( 'type' => 'string' ),
+						'bytes'    => array( 'type' => 'integer' ),
+					),
+				),
+				'permission_callback' => array( __CLASS__, 'can_edit_target' ),
+				'execute_callback'    => array( __CLASS__, 'read_file' ),
+				'meta'                => self::meta( array( 'annotations' => array( 'readonly' => true ) ) ),
+			)
+		);
+
+		wp_register_ability(
+			'ai-canvas/write-file',
+			array(
+				'label'               => __( 'Write canvas file', 'ai-canvas' ),
+				'description'         => __( 'Overwrite one canvas file (html = index.html, css = style.css, js = script.js) for a canvas post. The write is live immediately: index.html is injected between the theme header and footer, style.css and script.js are enqueued on the page. Max 2 MB per file.', 'ai-canvas' ),
+				'category'            => 'ai-canvas',
+				'input_schema'        => array_merge_recursive(
+					self::file_input_schema(),
+					array(
+						'required'   => array( 'contents' ),
+						'properties' => array( 'contents' => array( 'type' => 'string' ) ),
+					)
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'file'  => array( 'type' => 'string' ),
+						'bytes' => array( 'type' => 'integer' ),
+						'url'   => array( 'type' => 'string' ),
+					),
+				),
+				'permission_callback' => array( __CLASS__, 'can_edit_target' ),
+				'execute_callback'    => array( __CLASS__, 'write_file' ),
+				'meta'                => self::meta(),
+			)
+		);
+
+		wp_register_ability(
+			'ai-canvas/upload-media',
+			array(
+				'label'               => __( 'Upload media', 'ai-canvas' ),
+				'description'         => __( 'Add a file to the Media Library from a URL or base64 data, and get back the attachment URL to reference from canvas HTML/CSS.', 'ai-canvas' ),
+				'category'            => 'ai-canvas',
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'url'      => array(
+							'type'        => 'string',
+							'format'      => 'uri',
+							'description' => 'Remote file to sideload. Provide either url or base64.',
+						),
+						'base64'   => array(
+							'type'        => 'string',
+							'description' => 'Base64-encoded file contents. Requires filename.',
+						),
+						'filename' => array( 'type' => 'string' ),
+						'title'    => array( 'type' => 'string' ),
+						'alt'      => array( 'type' => 'string' ),
+					),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'attachment_id' => array( 'type' => 'integer' ),
+						'url'           => array( 'type' => 'string' ),
+						'mime'          => array( 'type' => 'string' ),
+					),
+				),
+				'permission_callback' => fn() => current_user_can( 'upload_files' ),
+				'execute_callback'    => array( __CLASS__, 'upload_media' ),
+				'meta'                => self::meta(),
+			)
+		);
+
+		wp_register_ability(
+			'ai-canvas/list-media',
+			array(
+				'label'               => __( 'List media', 'ai-canvas' ),
+				'description'         => __( 'Search the Media Library and get attachment URLs to reference from canvas HTML/CSS.', 'ai-canvas' ),
+				'category'            => 'ai-canvas',
+				'input_schema'        => array(
+					'type'       => 'object',
+					'properties' => array(
+						'search' => array( 'type' => 'string' ),
+						'limit'  => array(
+							'type'    => 'integer',
+							'default' => 20,
+							'maximum' => 100,
+						),
+					),
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'media' => array(
+							'type'  => 'array',
+							'items' => array(
+								'type'       => 'object',
+								'properties' => array(
+									'attachment_id' => array( 'type' => 'integer' ),
+									'url'           => array( 'type' => 'string' ),
+									'mime'          => array( 'type' => 'string' ),
+									'title'         => array( 'type' => 'string' ),
+									'alt'           => array( 'type' => 'string' ),
+								),
+							),
+						),
+					),
+				),
+				'permission_callback' => fn() => current_user_can( 'upload_files' ),
+				'execute_callback'    => array( __CLASS__, 'list_media' ),
+				'meta'                => self::meta( array( 'annotations' => array( 'readonly' => true ) ) ),
+			)
+		);
+
+	}
+
+	private static function file_input_schema(): array {
+		return array(
+			'type'       => 'object',
+			'required'   => array( 'post_id', 'file' ),
+			'properties' => array(
+				'post_id' => array( 'type' => 'integer' ),
+				'file'    => array(
+					'type' => 'string',
+					'enum' => array( 'html', 'css', 'js' ),
+				),
+			),
+		);
+	}
+
+	private static function canvas_schema(): array {
+		return array(
+			'type'       => 'object',
+			'properties' => array(
+				'post_id'   => array( 'type' => 'integer' ),
+				'title'     => array( 'type' => 'string' ),
+				'post_type' => array( 'type' => 'string' ),
+				'url'       => array( 'type' => 'string' ),
+				'edit_url'  => array( 'type' => 'string' ),
+				'files'     => array( 'type' => 'object' ),
+			),
+		);
+	}
+
+	public static function can_edit_target( $input = array() ): bool {
+		$post_id = (int) ( $input['post_id'] ?? 0 );
+		return $post_id > 0 && current_user_can( 'edit_post', $post_id );
+	}
+
+	// --- Execute callbacks -------------------------------------------------.
+
+	public static function create_canvas( $input = array() ) {
+		$post_id = wp_insert_post(
+			array(
+				'post_title'   => sanitize_text_field( $input['title'] ),
+				'post_name'    => sanitize_title( $input['slug'] ?? '' ),
+				'post_type'    => $input['post_type'] ?? 'page',
+				'post_status'  => 'publish',
+				// The block gives the editor an "AI-controlled" card instead of a
+				// blank canvas (and suppresses the starter-pattern modal). The
+				// canvas template doesn't render post content, so it's inert on
+				// the front end.
+				'post_content' => '<!-- wp:ai-canvas/content /-->',
+				'meta_input'   => array( '_wp_page_template' => AI_Canvas_Files::TEMPLATE_SLUG ),
+			),
+			true
+		);
+		if ( is_wp_error( $post_id ) ) {
+			return $post_id;
+		}
+
+		AI_Canvas_Files::scaffold( $post_id );
+
+		return self::describe_canvas( $post_id );
+	}
+
+	public static function list_canvases() {
+		$posts = get_posts(
+			array(
+				'post_type'      => array( 'page', 'post' ),
+				'post_status'    => 'any',
+				'posts_per_page' => 100,
+				'meta_key'       => '_wp_page_template',
+				'meta_value'     => AI_Canvas_Files::TEMPLATE_SLUG,
+			)
+		);
+
+		return array( 'canvases' => array_map( fn( $post ) => self::describe_canvas( $post->ID ), $posts ) );
+	}
+
+	public static function read_file( $input = array() ) {
+		$post_id = (int) $input['post_id'];
+		if ( ! AI_Canvas_Files::is_canvas( $post_id ) ) {
+			return self::not_a_canvas( $post_id );
+		}
+		$contents = AI_Canvas_Files::read( $post_id, $input['file'] );
+		if ( is_wp_error( $contents ) ) {
+			return $contents;
+		}
+		return array(
+			'contents' => $contents,
+			'bytes'    => strlen( $contents ),
+		);
+	}
+
+	public static function write_file( $input = array() ) {
+		$post_id = (int) $input['post_id'];
+		if ( ! AI_Canvas_Files::is_canvas( $post_id ) ) {
+			return self::not_a_canvas( $post_id );
+		}
+		$result = AI_Canvas_Files::write( $post_id, $input['file'], $input['contents'] );
+		if ( ! is_wp_error( $result ) ) {
+			AI_Canvas_Cache::purge( $post_id );
+		}
+		return $result;
+	}
+
+	public static function upload_media( $input = array() ) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+		require_once ABSPATH . 'wp-admin/includes/media.php';
+		require_once ABSPATH . 'wp-admin/includes/image.php';
+
+		if ( ! empty( $input['url'] ) ) {
+			$tmp = download_url( $input['url'] );
+			if ( is_wp_error( $tmp ) ) {
+				return $tmp;
+			}
+			$name = $input['filename'] ?? basename( (string) wp_parse_url( $input['url'], PHP_URL_PATH ) );
+		} elseif ( ! empty( $input['base64'] ) && ! empty( $input['filename'] ) ) {
+			$contents = base64_decode( $input['base64'], true );
+			if ( false === $contents ) {
+				return new WP_Error( 'ai_canvas_bad_base64', 'base64 could not be decoded.' );
+			}
+			$name = sanitize_file_name( $input['filename'] );
+			$tmp  = wp_tempnam( $name );
+			if ( ! $tmp || false === file_put_contents( $tmp, $contents ) ) {
+				return new WP_Error( 'ai_canvas_tmp_failed', 'Could not stage the upload.' );
+			}
+		} else {
+			return new WP_Error( 'ai_canvas_bad_input', 'Provide either url, or base64 with filename.' );
+		}
+
+		$attachment_id = media_handle_sideload(
+			array(
+				'name'     => $name,
+				'tmp_name' => $tmp,
+			),
+			0,
+			$input['title'] ?? null
+		);
+		if ( is_wp_error( $attachment_id ) ) {
+			@unlink( $tmp );
+			return $attachment_id;
+		}
+
+		if ( ! empty( $input['alt'] ) ) {
+			update_post_meta( $attachment_id, '_wp_attachment_image_alt', sanitize_text_field( $input['alt'] ) );
+		}
+
+		return array(
+			'attachment_id' => $attachment_id,
+			'url'           => wp_get_attachment_url( $attachment_id ),
+			'mime'          => get_post_mime_type( $attachment_id ),
+		);
+	}
+
+	public static function list_media( $input = array() ) {
+		$attachments = get_posts(
+			array(
+				'post_type'      => 'attachment',
+				'post_status'    => 'inherit',
+				'posts_per_page' => min( 100, (int) ( $input['limit'] ?? 20 ) ),
+				's'              => $input['search'] ?? '',
+			)
+		);
+
+		return array(
+			'media' => array_map(
+				fn( $att ) => array(
+					'attachment_id' => $att->ID,
+					'url'           => wp_get_attachment_url( $att->ID ),
+					'mime'          => $att->post_mime_type,
+					'title'         => $att->post_title,
+					'alt'           => (string) get_post_meta( $att->ID, '_wp_attachment_image_alt', true ),
+				),
+				$attachments
+			),
+		);
+	}
+
+	private static function describe_canvas( int $post_id ): array {
+		return array(
+			'post_id'   => $post_id,
+			'title'     => get_the_title( $post_id ),
+			'post_type' => (string) get_post_type( $post_id ),
+			'url'       => get_permalink( $post_id ),
+			'edit_url'  => get_edit_post_link( $post_id, 'raw' ),
+			'files'     => AI_Canvas_Files::mtimes( $post_id ),
+		);
+	}
+
+	private static function not_a_canvas( int $post_id ): WP_Error {
+		return new WP_Error(
+			'ai_canvas_not_canvas',
+			sprintf( 'Post %d is not an AI canvas. Use create-canvas first, or list-canvases to find one.', $post_id )
+		);
+	}
+}
