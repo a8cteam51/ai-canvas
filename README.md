@@ -2,7 +2,7 @@
 
 Give an AI agent a controlled sandbox to vibe-code landing pages on a block-theme site.
 
-Each canvas is a normal WordPress page (or post) whose body is a trio of files the plugin owns — `index.html`, `style.css`, `script.js` — stored under `wp-content/uploads/ai-canvas/{post_id}/`. On the front end the page renders as: **theme header template part → your files → theme footer template part**. An external agent (Claude Code, Claude Desktop, any MCP client) writes those files, and only those files, through an MCP endpoint the plugin exposes — plus upload/search access to the Media Library.
+Each canvas is a normal WordPress page (or post) whose body is a trio of files the plugin owns — `index.html`, `style.css`, `script.js` — stored under `wp-content/uploads/ai-canvas/{post_id}/`. On the front end the page renders on one of two templates: **theme** (theme header template part → your files → theme footer template part) or **blank** (your files alone — the canvas supplies its own header and footer). An external agent (Claude Code, Claude Desktop, any MCP client) writes those files, and only those files, through an MCP endpoint the plugin exposes — plus upload/search access to the Media Library.
 
 No blocks, no editor round-trips. The files are the canonical source; writes are live immediately.
 
@@ -38,10 +38,11 @@ No blocks, no editor round-trips. The files are the canonical source; writes are
 
 | Tool | Does | Requires |
 |---|---|---|
-| `create-canvas` | Create a published page/post, scaffold its file set, assign the Canvas template | publish capability for the post type + `unfiltered_html` |
+| `create-canvas` | Create a published page/post, scaffold its file set, assign the `theme` (default) or `blank` template | publish capability for the post type + `unfiltered_html` |
 | `list-canvases` | Canvases the caller can edit, with IDs, URLs, file mtimes | `edit_pages`, filtered per-post by `edit_post` |
 | `read-file` | Read one of `html` \| `css` \| `js` for a canvas | `edit_post` on the target |
-| `write-file` | Overwrite one file (2 MB cap) | `edit_post` on the target + `unfiltered_html` |
+| `write-file` | Overwrite one file (2 MB cap); the outgoing contents become the file's retained previous version | `edit_post` on the target + `unfiltered_html` |
+| `rollback-file` | Swap a file with its retained previous version — one slot per file, so calling it again undoes the rollback | `edit_post` on the target + `unfiltered_html` |
 | `upload-media` | Sideload a file into the Media Library from a URL or base64 (site upload limit applies) | `upload_files` |
 | `list-media` | Search the Media Library, get URLs to reference (own uploads only without `edit_others_posts`) | `upload_files` |
 
@@ -51,7 +52,7 @@ The tool contract has no path parameters at all — files are addressed by post 
 
 ## How rendering works
 
-- The plugin registers an "AI Canvas" block template (`ai-canvas//canvas`): the theme's header template part, an internal dynamic block that echoes `index.html`, the footer template part. It shows up in the editor's Template panel like any other template.
+- The plugin registers two block templates: "AI Canvas" (`ai-canvas//canvas`) — the theme's header template part, an internal dynamic block that echoes `index.html`, the footer template part — and "AI Canvas (Blank)" (`ai-canvas//canvas-blank`), which is just the canvas block, so the canvas controls the whole page (`wp_head`/`wp_footer` still fire, so the CSS/JS enqueues work). Both show up in the editor's Template panel like any other template.
 - In wp-admin, canvas pages don't present a blank editor: a pinned notice plus a locked "AI-controlled canvas" placeholder card explain that the content lives in the file set and is edited through the connected agent.
 - `style.css` and `script.js` are enqueued on canvas pages with `filemtime()` cache-busting.
 - `index.html` is read server-side and never web-served; only the CSS/JS need to be publicly readable from `uploads/`.
@@ -59,4 +60,4 @@ The tool contract has no path parameters at all — files are addressed by post 
 
 ## Not in v1 (on purpose)
 
-Output sanitization, draft/preview, write history or rollback, classic themes, an embedded chat UI, settings screens.
+Output sanitization, draft/preview, write history beyond the single per-file rollback slot, classic themes, an embedded chat UI, settings screens.

@@ -36,7 +36,7 @@ class AI_Canvas_Render {
 		// core/template-part blocks (not PHP block_template_part()) so the theme's
 		// wrapper element and attributes are preserved; core injects the theme attribute.
 		register_block_template(
-			'ai-canvas//canvas',
+			'ai-canvas//' . AI_Canvas_Files::TEMPLATE_SLUG,
 			array(
 				'title'       => __( 'AI Canvas', 'ai-canvas' ),
 				'description' => __( 'Theme header and footer around an AI-written HTML/CSS/JS canvas.', 'ai-canvas' ),
@@ -44,6 +44,18 @@ class AI_Canvas_Render {
 				'content'     => '<!-- wp:template-part {"slug":"header","tagName":"header"} /-->'
 					. '<!-- wp:ai-canvas/content /-->'
 					. '<!-- wp:template-part {"slug":"footer","tagName":"footer"} /-->',
+			)
+		);
+
+		// No template parts at all: the canvas supplies its own header/footer.
+		// wp_head/wp_footer still fire, so style.css/script.js enqueues work.
+		register_block_template(
+			'ai-canvas//' . AI_Canvas_Files::TEMPLATE_SLUG_BLANK,
+			array(
+				'title'       => __( 'AI Canvas (Blank)', 'ai-canvas' ),
+				'description' => __( 'An AI-written HTML/CSS/JS canvas with no theme header or footer; the canvas controls the whole page.', 'ai-canvas' ),
+				'post_types'  => array( 'page', 'post' ),
+				'content'     => '<!-- wp:ai-canvas/content /-->',
 			)
 		);
 

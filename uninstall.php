@@ -17,7 +17,7 @@ if ( ! is_dir( $ai_canvas_base ) ) {
 // anything unexpected is left untouched rather than recursively deleted.
 foreach ( glob( $ai_canvas_base . '/*', GLOB_ONLYDIR ) ?: array() as $ai_canvas_dir ) {
 	foreach ( array( 'index.html', 'style.css', 'script.js' ) as $ai_canvas_file ) {
-		foreach ( array( $ai_canvas_dir . '/' . $ai_canvas_file, $ai_canvas_dir . '/.' . $ai_canvas_file . '.tmp' ) as $ai_canvas_path ) {
+		foreach ( array( $ai_canvas_dir . '/' . $ai_canvas_file, $ai_canvas_dir . '/.' . $ai_canvas_file . '.tmp', $ai_canvas_dir . '/.' . $ai_canvas_file . '.prev' ) as $ai_canvas_path ) {
 			if ( file_exists( $ai_canvas_path ) ) {
 				@unlink( $ai_canvas_path );
 			}

@@ -6,7 +6,7 @@
  * Description:     Per-page AI-writable HTML/CSS/JS canvases rendered between the theme header and footer, exposed to agents via MCP.
  * Author:          Team51
  * Text Domain:     ai-canvas
- * Version:         0.1.0
+ * Version:         0.2.0
  * Requires at least: 6.9
  * Requires PHP:    8.0
  * Requires Plugins: mcp-adapter
@@ -16,7 +16,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'AI_CANVAS_VERSION', '0.1.0' );
+define( 'AI_CANVAS_VERSION', '0.2.0' );
 define( 'AI_CANVAS_FILE', __FILE__ );
 define( 'AI_CANVAS_DIR', plugin_dir_path( __FILE__ ) );
 

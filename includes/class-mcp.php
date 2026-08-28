@@ -22,7 +22,7 @@ class AI_Canvas_MCP {
 			'ai-canvas',
 			'mcp',
 			'AI-Canvas',
-			'Vibe-code landing pages: per-page HTML/CSS/JS canvases rendered between the theme header and footer, plus Media Library access.',
+			'Vibe-code landing pages: per-page HTML/CSS/JS canvases rendered between the theme header and footer or on a fully blank page, plus Media Library access.',
 			AI_CANVAS_VERSION,
 			array( \WP\MCP\Transport\HttpTransport::class ),
 			null,

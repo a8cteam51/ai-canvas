@@ -14,6 +14,7 @@ class AI_Canvas_Abilities {
 		'ai-canvas/list-canvases',
 		'ai-canvas/read-file',
 		'ai-canvas/write-file',
+		'ai-canvas/rollback-file',
 		'ai-canvas/upload-media',
 		'ai-canvas/list-media',
 	);
@@ -51,7 +52,7 @@ class AI_Canvas_Abilities {
 			'ai-canvas/create-canvas',
 			array(
 				'label'               => __( 'Create canvas', 'ai-canvas' ),
-				'description'         => __( 'Create a published page or post rendered as an AI canvas: the theme header and footer around an HTML/CSS/JS file set this agent can write to. Returns the new post ID needed by the file tools.', 'ai-canvas' ),
+				'description'         => __( 'Create a published page or post rendered as an AI canvas: an HTML/CSS/JS file set this agent can write to, wrapped in the theme header and footer (template "theme") or on a completely blank page the canvas fully controls (template "blank"). Returns the new post ID needed by the file tools.', 'ai-canvas' ),
 				'category'            => 'ai-canvas',
 				'input_schema'        => array(
 					'type'       => 'object',
@@ -63,6 +64,12 @@ class AI_Canvas_Abilities {
 							'type'    => 'string',
 							'enum'    => array( 'page', 'post' ),
 							'default' => 'page',
+						),
+						'template'  => array(
+							'type'        => 'string',
+							'enum'        => array( 'theme', 'blank' ),
+							'default'     => 'theme',
+							'description' => 'theme = canvas between the theme header and footer; blank = no theme header/footer, the canvas controls the whole page.',
 						),
 					),
 				),
@@ -124,7 +131,7 @@ class AI_Canvas_Abilities {
 			'ai-canvas/write-file',
 			array(
 				'label'               => __( 'Write canvas file', 'ai-canvas' ),
-				'description'         => __( 'Overwrite one canvas file (html = index.html, css = style.css, js = script.js) for a canvas post. The write is live immediately: index.html is injected between the theme header and footer, style.css and script.js are enqueued on the page. Max 2 MB per file.', 'ai-canvas' ),
+				'description'         => __( 'Overwrite one canvas file (html = index.html, css = style.css, js = script.js) for a canvas post. The write is live immediately: index.html renders as the page body (between the theme header and footer on the theme template, alone on the blank template), style.css and script.js are enqueued on the page. The overwritten contents are retained as the file\'s single previous version for rollback-file. Max 2 MB per file.', 'ai-canvas' ),
 				'category'            => 'ai-canvas',
 				'input_schema'        => array_merge_recursive(
 					self::file_input_schema(),
@@ -143,6 +150,27 @@ class AI_Canvas_Abilities {
 				),
 				'permission_callback' => array( __CLASS__, 'can_write_target' ),
 				'execute_callback'    => array( __CLASS__, 'write_file' ),
+				'meta'                => self::meta(),
+			)
+		);
+
+		wp_register_ability(
+			'ai-canvas/rollback-file',
+			array(
+				'label'               => __( 'Roll back canvas file', 'ai-canvas' ),
+				'description'         => __( 'Instantly restore a canvas file (html = index.html, css = style.css, js = script.js) to its previous version — the contents it had before the last write. Exactly one previous version is retained per file, and rolling back swaps current and previous, so calling this again undoes the rollback. The restore is live immediately.', 'ai-canvas' ),
+				'category'            => 'ai-canvas',
+				'input_schema'        => self::file_input_schema(),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'file'  => array( 'type' => 'string' ),
+						'bytes' => array( 'type' => 'integer' ),
+						'url'   => array( 'type' => 'string' ),
+					),
+				),
+				'permission_callback' => array( __CLASS__, 'can_write_target' ),
+				'execute_callback'    => array( __CLASS__, 'rollback_file' ),
 				'meta'                => self::meta(),
 			)
 		);
@@ -248,6 +276,10 @@ class AI_Canvas_Abilities {
 				'post_id'   => array( 'type' => 'integer' ),
 				'title'     => array( 'type' => 'string' ),
 				'post_type' => array( 'type' => 'string' ),
+				'template'  => array(
+					'type' => 'string',
+					'enum' => array( 'theme', 'blank' ),
+				),
 				'url'       => array( 'type' => 'string' ),
 				'edit_url'  => array( 'type' => 'string' ),
 				'files'     => array( 'type' => 'object' ),
@@ -272,6 +304,10 @@ class AI_Canvas_Abilities {
 	// --- Execute callbacks -------------------------------------------------.
 
 	public static function create_canvas( $input = array() ) {
+		$template = 'blank' === ( $input['template'] ?? 'theme' )
+			? AI_Canvas_Files::TEMPLATE_SLUG_BLANK
+			: AI_Canvas_Files::TEMPLATE_SLUG;
+
 		$post_id = wp_insert_post(
 			array(
 				'post_title'   => sanitize_text_field( $input['title'] ),
@@ -280,10 +316,10 @@ class AI_Canvas_Abilities {
 				'post_status'  => 'publish',
 				// The block gives the editor an "AI-controlled" card instead of a
 				// blank canvas (and suppresses the starter-pattern modal). The
-				// canvas template doesn't render post content, so it's inert on
+				// canvas templates don't render post content, so it's inert on
 				// the front end.
 				'post_content' => '<!-- wp:ai-canvas/content /-->',
-				'meta_input'   => array( '_wp_page_template' => AI_Canvas_Files::TEMPLATE_SLUG ),
+				'meta_input'   => array( '_wp_page_template' => $template ),
 			),
 			true
 		);
@@ -303,7 +339,8 @@ class AI_Canvas_Abilities {
 				'post_status'    => 'any',
 				'posts_per_page' => 100,
 				'meta_key'       => '_wp_page_template',
-				'meta_value'     => AI_Canvas_Files::TEMPLATE_SLUG,
+				'meta_value'     => AI_Canvas_Files::TEMPLATE_SLUGS,
+				'meta_compare'   => 'IN',
 			)
 		);
 
@@ -335,6 +372,18 @@ class AI_Canvas_Abilities {
 			return self::not_a_canvas( $post_id );
 		}
 		$result = AI_Canvas_Files::write( $post_id, $input['file'], $input['contents'] );
+		if ( ! is_wp_error( $result ) ) {
+			AI_Canvas_Cache::purge( $post_id );
+		}
+		return $result;
+	}
+
+	public static function rollback_file( $input = array() ) {
+		$post_id = (int) $input['post_id'];
+		if ( ! AI_Canvas_Files::is_canvas( $post_id ) ) {
+			return self::not_a_canvas( $post_id );
+		}
+		$result = AI_Canvas_Files::rollback( $post_id, $input['file'] );
 		if ( ! is_wp_error( $result ) ) {
 			AI_Canvas_Cache::purge( $post_id );
 		}
@@ -437,6 +486,7 @@ class AI_Canvas_Abilities {
 			'post_id'   => $post_id,
 			'title'     => get_the_title( $post_id ),
 			'post_type' => (string) get_post_type( $post_id ),
+			'template'  => AI_Canvas_Files::TEMPLATE_SLUG_BLANK === get_page_template_slug( $post_id ) ? 'blank' : 'theme',
 			'url'       => get_permalink( $post_id ),
 			'edit_url'  => get_edit_post_link( $post_id, 'raw' ),
 			'files'     => AI_Canvas_Files::mtimes( $post_id ),

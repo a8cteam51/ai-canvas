@@ -35,7 +35,7 @@ class AI_Canvas_Files {
 			return;
 		}
 		foreach ( self::FILES as $filename ) {
-			foreach ( array( $dir . '/' . $filename, $dir . '/.' . $filename . '.tmp' ) as $path ) {
+			foreach ( array( $dir . '/' . $filename, $dir . '/.' . $filename . '.tmp', $dir . '/.' . $filename . '.prev' ) as $path ) {
 				if ( file_exists( $path ) ) {
 					@unlink( $path );
 				}
@@ -46,7 +46,9 @@ class AI_Canvas_Files {
 
 	const MAX_BYTES = 2097152; // 2 MB per file.
 
-	const TEMPLATE_SLUG = 'canvas';
+	const TEMPLATE_SLUG       = 'canvas';
+	const TEMPLATE_SLUG_BLANK = 'canvas-blank';
+	const TEMPLATE_SLUGS      = array( self::TEMPLATE_SLUG, self::TEMPLATE_SLUG_BLANK );
 
 	public static function base_dir(): string {
 		return trailingslashit( wp_upload_dir()['basedir'] ) . 'ai-canvas';
@@ -68,11 +70,11 @@ class AI_Canvas_Files {
 	}
 
 	/**
-	 * A post is a canvas when the AI-Canvas template is assigned to it.
+	 * A post is a canvas when either AI-Canvas template is assigned to it.
 	 */
 	public static function is_canvas( int $post_id ): bool {
 		return get_post( $post_id ) instanceof WP_Post
-			&& get_page_template_slug( $post_id ) === self::TEMPLATE_SLUG;
+			&& in_array( get_page_template_slug( $post_id ), self::TEMPLATE_SLUGS, true );
 	}
 
 	public static function read( int $post_id, string $file ): string|WP_Error {
@@ -113,7 +115,18 @@ class AI_Canvas_Files {
 
 		// Write to a temp file then rename so a half-written asset is never served.
 		$tmp = $dir . '/.' . self::FILES[ $file ] . '.tmp';
-		if ( false === file_put_contents( $tmp, $contents ) || ! rename( $tmp, $path ) ) {
+		if ( false === file_put_contents( $tmp, $contents ) ) {
+			@unlink( $tmp );
+			return new WP_Error( 'ai_canvas_write_failed', 'Could not write the file.' );
+		}
+
+		// Retain the outgoing version as the single rollback slot. An identical
+		// write skips the copy so a no-op doesn't burn the slot.
+		if ( file_exists( $path ) && file_get_contents( $path ) !== $contents ) {
+			@copy( $path, self::prev_path_for( $post_id, $file ) );
+		}
+
+		if ( ! rename( $tmp, $path ) ) {
 			@unlink( $tmp );
 			return new WP_Error( 'ai_canvas_write_failed', 'Could not write the file.' );
 		}
@@ -121,6 +134,51 @@ class AI_Canvas_Files {
 		return array(
 			'file'  => $file,
 			'bytes' => strlen( $contents ),
+			'url'   => 'html' === $file ? get_permalink( $post_id ) : self::url( $post_id, $file ),
+		);
+	}
+
+	/**
+	 * Path of the retained previous version. Assumes $file is already a valid
+	 * enum key — callers go through path() first.
+	 */
+	private static function prev_path_for( int $post_id, string $file ): string {
+		return self::dir( $post_id ) . '/.' . self::FILES[ $file ] . '.prev';
+	}
+
+	/**
+	 * Swap the live file with its retained previous version. Symmetric by
+	 * design: rolling back twice restores the original, so a rollback is
+	 * itself undoable. The live file is replaced via rename() so visitors
+	 * never hit a missing asset mid-swap.
+	 */
+	public static function rollback( int $post_id, string $file ): array|WP_Error {
+		$path = self::path( $post_id, $file );
+		if ( is_wp_error( $path ) ) {
+			return $path;
+		}
+		$prev = self::prev_path_for( $post_id, $file );
+		if ( ! file_exists( $prev ) ) {
+			return new WP_Error( 'ai_canvas_no_previous', sprintf( 'No previous version of the %s file exists for post %d — nothing has overwritten it yet.', $file, $post_id ) );
+		}
+
+		$stash = self::dir( $post_id ) . '/.' . self::FILES[ $file ] . '.tmp';
+		if ( file_exists( $path ) && ! copy( $path, $stash ) ) {
+			return new WP_Error( 'ai_canvas_rollback_failed', 'Could not stage the current version.' );
+		}
+		if ( ! rename( $prev, $path ) ) {
+			@unlink( $stash );
+			return new WP_Error( 'ai_canvas_rollback_failed', 'Could not restore the previous version.' );
+		}
+		// Failing to arm the redo slot only costs the ability to undo this
+		// rollback; the restore itself already succeeded.
+		if ( file_exists( $stash ) && ! rename( $stash, $prev ) ) {
+			@unlink( $stash );
+		}
+
+		return array(
+			'file'  => $file,
+			'bytes' => (int) filesize( $path ),
 			'url'   => 'html' === $file ? get_permalink( $post_id ) : self::url( $post_id, $file ),
 		);
 	}
