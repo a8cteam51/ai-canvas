@@ -17,6 +17,33 @@ class AI_Canvas_Files {
 		'js'   => 'script.js',
 	);
 
+	public static function init(): void {
+		// Trash keeps the files (the post is restorable); permanent deletion
+		// removes them so canvas content doesn't outlive its post.
+		add_action( 'before_delete_post', array( __CLASS__, 'delete_for_post' ) );
+	}
+
+	/**
+	 * Remove the file set for a post being permanently deleted. Keyed on the
+	 * directory existing (not is_canvas) so files are cleaned up even when the
+	 * template was reassigned before deletion. Only known filenames are
+	 * removed; a directory holding anything else is left in place.
+	 */
+	public static function delete_for_post( int $post_id ): void {
+		$dir = self::dir( $post_id );
+		if ( ! is_dir( $dir ) ) {
+			return;
+		}
+		foreach ( self::FILES as $filename ) {
+			foreach ( array( $dir . '/' . $filename, $dir . '/.' . $filename . '.tmp' ) as $path ) {
+				if ( file_exists( $path ) ) {
+					@unlink( $path );
+				}
+			}
+		}
+		@rmdir( $dir );
+	}
+
 	const MAX_BYTES = 2097152; // 2 MB per file.
 
 	const TEMPLATE_SLUG = 'canvas';

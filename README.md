@@ -38,13 +38,16 @@ No blocks, no editor round-trips. The files are the canonical source; writes are
 
 | Tool | Does | Requires |
 |---|---|---|
-| `create-canvas` | Create a published page/post, scaffold its file set, assign the Canvas template | publish capability for the post type |
-| `list-canvases` | All canvases with IDs, URLs, file mtimes | `edit_pages` |
-| `read-file` / `write-file` | Read/overwrite one of `html` \| `css` \| `js` for a canvas (2 MB cap) | `edit_post` on the target |
-| `upload-media` | Sideload a file into the Media Library from a URL or base64 | `upload_files` |
-| `list-media` | Search the Media Library, get URLs to reference | `upload_files` |
+| `create-canvas` | Create a published page/post, scaffold its file set, assign the Canvas template | publish capability for the post type + `unfiltered_html` |
+| `list-canvases` | Canvases the caller can edit, with IDs, URLs, file mtimes | `edit_pages`, filtered per-post by `edit_post` |
+| `read-file` | Read one of `html` \| `css` \| `js` for a canvas | `edit_post` on the target |
+| `write-file` | Overwrite one file (2 MB cap) | `edit_post` on the target + `unfiltered_html` |
+| `upload-media` | Sideload a file into the Media Library from a URL or base64 (site upload limit applies) | `upload_files` |
+| `list-media` | Search the Media Library, get URLs to reference (own uploads only without `edit_others_posts`) | `upload_files` |
 
-The tool contract has no path parameters at all — files are addressed by post ID plus a fixed enum, so the agent cannot write anywhere else on the filesystem.
+Writing canvas content is writing unsanitized same-origin HTML/JS, so it demands the capability WordPress already reserves for exactly that: `unfiltered_html`. In practice that means **Editor or Administrator on a single site, super admins only on multisite**, and no one when `DISALLOW_UNFILTERED_HTML` is defined. The MCP endpoint itself requires `edit_posts`, so Subscribers can't even list the tools.
+
+The tool contract has no path parameters at all — files are addressed by post ID plus a fixed enum, so the agent cannot write anywhere else on the filesystem. Permanently deleting a canvas post removes its file set; uninstalling the plugin removes all of them.
 
 ## How rendering works
 

@@ -37,6 +37,7 @@ require AI_CANVAS_DIR . 'includes/class-cache.php';
 require AI_CANVAS_DIR . 'includes/class-abilities.php';
 require AI_CANVAS_DIR . 'includes/class-mcp.php';
 
+AI_Canvas_Files::init();
 AI_Canvas_Render::init();
 AI_Canvas_Abilities::init();
 AI_Canvas_MCP::init();

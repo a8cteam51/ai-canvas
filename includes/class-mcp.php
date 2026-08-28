@@ -27,7 +27,13 @@ class AI_Canvas_MCP {
 			array( \WP\MCP\Transport\HttpTransport::class ),
 			null,
 			null,
-			AI_Canvas_Abilities::ABILITIES
+			AI_Canvas_Abilities::ABILITIES,
+			array(),
+			array(),
+			// Transport-level gate: without it any logged-in user (Subscribers
+			// included) can enumerate tool names/descriptions. Per-tool
+			// permission callbacks still apply on top.
+			fn() => current_user_can( 'edit_posts' )
 		);
 	}
 }

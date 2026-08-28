@@ -69,7 +69,9 @@ class AI_Canvas_Abilities {
 				'output_schema'       => self::canvas_schema(),
 				'permission_callback' => function ( $input = array() ) {
 					$post_type = get_post_type_object( $input['post_type'] ?? 'page' );
-					return $post_type && current_user_can( $post_type->cap->publish_posts );
+					return $post_type
+						&& current_user_can( $post_type->cap->publish_posts )
+						&& current_user_can( 'unfiltered_html' );
 				},
 				'execute_callback'    => array( __CLASS__, 'create_canvas' ),
 				'meta'                => self::meta(),
@@ -139,7 +141,7 @@ class AI_Canvas_Abilities {
 						'url'   => array( 'type' => 'string' ),
 					),
 				),
-				'permission_callback' => array( __CLASS__, 'can_edit_target' ),
+				'permission_callback' => array( __CLASS__, 'can_write_target' ),
 				'execute_callback'    => array( __CLASS__, 'write_file' ),
 				'meta'                => self::meta(),
 			)
@@ -258,6 +260,15 @@ class AI_Canvas_Abilities {
 		return $post_id > 0 && current_user_can( 'edit_post', $post_id );
 	}
 
+	/**
+	 * Canvas writes are unsanitized same-origin HTML/JS, which is exactly what
+	 * core reserves unfiltered_html for (Editor+ on single site, super admins
+	 * on multisite, nobody when DISALLOW_UNFILTERED_HTML is set).
+	 */
+	public static function can_write_target( $input = array() ): bool {
+		return self::can_edit_target( $input ) && current_user_can( 'unfiltered_html' );
+	}
+
 	// --- Execute callbacks -------------------------------------------------.
 
 	public static function create_canvas( $input = array() ) {
@@ -296,7 +307,11 @@ class AI_Canvas_Abilities {
 			)
 		);
 
-		return array( 'canvases' => array_map( fn( $post ) => self::describe_canvas( $post->ID ), $posts ) );
+		// Only surface canvases the caller could actually edit; the edit_pages
+		// gate alone doesn't imply access to other users' drafts/private posts.
+		$posts = array_filter( $posts, fn( $post ) => current_user_can( 'edit_post', $post->ID ) );
+
+		return array( 'canvases' => array_values( array_map( fn( $post ) => self::describe_canvas( $post->ID ), $posts ) ) );
 	}
 
 	public static function read_file( $input = array() ) {
@@ -331,16 +346,30 @@ class AI_Canvas_Abilities {
 		require_once ABSPATH . 'wp-admin/includes/media.php';
 		require_once ABSPATH . 'wp-admin/includes/image.php';
 
+		$max_bytes = wp_max_upload_size();
+
 		if ( ! empty( $input['url'] ) ) {
 			$tmp = download_url( $input['url'] );
 			if ( is_wp_error( $tmp ) ) {
 				return $tmp;
 			}
+			if ( filesize( $tmp ) > $max_bytes ) {
+				@unlink( $tmp );
+				return new WP_Error( 'ai_canvas_too_large', sprintf( 'Download exceeds the %d byte upload limit.', $max_bytes ) );
+			}
 			$name = $input['filename'] ?? basename( (string) wp_parse_url( $input['url'], PHP_URL_PATH ) );
 		} elseif ( ! empty( $input['base64'] ) && ! empty( $input['filename'] ) ) {
+			// Check the encoded length before decoding so an oversized payload
+			// never allocates its decoded form (base64 inflates ~4/3).
+			if ( strlen( $input['base64'] ) > ( $max_bytes * 4 / 3 ) + 1024 ) {
+				return new WP_Error( 'ai_canvas_too_large', sprintf( 'Upload exceeds the %d byte upload limit.', $max_bytes ) );
+			}
 			$contents = base64_decode( $input['base64'], true );
 			if ( false === $contents ) {
 				return new WP_Error( 'ai_canvas_bad_base64', 'base64 could not be decoded.' );
+			}
+			if ( strlen( $contents ) > $max_bytes ) {
+				return new WP_Error( 'ai_canvas_too_large', sprintf( 'Upload exceeds the %d byte upload limit.', $max_bytes ) );
 			}
 			$name = sanitize_file_name( $input['filename'] );
 			$tmp  = wp_tempnam( $name );
@@ -376,14 +405,18 @@ class AI_Canvas_Abilities {
 	}
 
 	public static function list_media( $input = array() ) {
-		$attachments = get_posts(
-			array(
-				'post_type'      => 'attachment',
-				'post_status'    => 'inherit',
-				'posts_per_page' => min( 100, (int) ( $input['limit'] ?? 20 ) ),
-				's'              => $input['search'] ?? '',
-			)
+		$args = array(
+			'post_type'      => 'attachment',
+			'post_status'    => 'inherit',
+			'posts_per_page' => min( 100, (int) ( $input['limit'] ?? 20 ) ),
+			's'              => $input['search'] ?? '',
 		);
+		// Mirror the admin media library: users who can't edit others' posts
+		// only see their own uploads.
+		if ( ! current_user_can( 'edit_others_posts' ) ) {
+			$args['author'] = get_current_user_id();
+		}
+		$attachments = get_posts( $args );
 
 		return array(
 			'media' => array_map(
