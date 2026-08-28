@@ -4,13 +4,27 @@ Give an AI agent a controlled sandbox to vibe-code landing pages on a block-them
 
 Each canvas is a normal WordPress page (or post) whose body is a trio of files the plugin owns — `index.html`, `style.css`, `script.js` — stored under `wp-content/uploads/ai-canvas/{post_id}/`. On the front end the page renders on one of two templates: **theme** (theme header template part → your files → theme footer template part) or **blank** (your files alone — the canvas supplies its own header and footer). An external agent (Claude Code, Claude Desktop, any MCP client) writes those files, and only those files, through an MCP endpoint the plugin exposes — plus upload/search access to the Media Library.
 
-No blocks, no editor round-trips. The files are the canonical source; writes are live immediately.
+No blocks, no editor round-trips. The files are the canonical source; writes are live immediately, and every write retains the file's previous version so the last change can be rolled back with a single call.
 
 ## ⚠️ Read this first
 
 **AI-Canvas deliberately trusts AI output.** Whatever the agent writes into `index.html` / `script.js` is served to visitors unsanitized and runs same-origin — it can read the DOM, make credentialed REST requests, and act with the session of any logged-in viewer. This is cross-site scripting by design.
 
 **Use it only on development sites or sites where you would happily hand the agent an admin account.** Do not run it on a site with real users or real customer data.
+
+## The companion Claude Code plugin
+
+This WordPress plugin is the capability surface: the MCP endpoint, the file jail, the rendering. What the agent *should do* with those capabilities lives in the companion **[ai-canvas Claude Code plugin](https://github.com/a8cteam51/claude-code-plugins/tree/trunk/plugins/ai-canvas)**, and you want both halves:
+
+- Its **setup skill** walks a non-technical site owner through the entire connection — plugin installs, a dedicated Editor user, the Application Password — one wp-admin step at a time, then automatically verifies the site (endpoint, auth-header passthrough, capabilities including `unfiltered_html`) and registers the MCP server in Claude Code.
+- Its **vibe skill** is the guardrail set this plugin can't enforce from the server side: CSS scoping so canvas styles never bleed into the theme's header/footer, performance rules (right-sized image variants, explicit dimensions, fold-aware lazy-loading, IntersectionObserver instead of layout-reading scroll handlers), read-before-write and rollback discipline, verification of the live page in a real browser via Claude in Chrome, and plain-language reporting for non-technical users.
+
+Without the skills, any MCP client can still connect and write files — but a generic agent tends to produce exactly the pages you don't want: theme-bleeding selectors, full-size hero images, scroll-handler jank, and no verification beyond "the write returned 200".
+
+```bash
+/plugin marketplace add a8cteam51/claude-code-plugins
+/plugin install ai-canvas@a8cteam51-claude-code-plugins
+```
 
 ## Requirements
 
@@ -20,8 +34,12 @@ No blocks, no editor round-trips. The files are the canonical source; writes are
 
 ## Setup
 
+**Recommended:** install the [companion Claude Code plugin](#the-companion-claude-code-plugin) and say `set up AI-Canvas on https://your-site.tld` — the setup skill runs the whole flow below interactively, including the verification checks.
+
+**Manual:**
+
 1. Activate `mcp-adapter` and `ai-canvas`.
-2. Create an Application Password for a user who can publish pages and upload files:
+2. Create an Application Password for a user who can publish pages and upload files (an Editor — see [capabilities](#mcp-tools)):
    ```bash
    wp user application-password create <user> "ai-canvas" --porcelain
    ```
@@ -43,21 +61,44 @@ No blocks, no editor round-trips. The files are the canonical source; writes are
 | `read-file` | Read one of `html` \| `css` \| `js` for a canvas | `edit_post` on the target |
 | `write-file` | Overwrite one file (2 MB cap); the outgoing contents become the file's retained previous version | `edit_post` on the target + `unfiltered_html` |
 | `rollback-file` | Swap a file with its retained previous version — one slot per file, so calling it again undoes the rollback | `edit_post` on the target + `unfiltered_html` |
-| `upload-media` | Sideload a file into the Media Library from a URL or base64 (site upload limit applies) | `upload_files` |
-| `list-media` | Search the Media Library, get URLs to reference (own uploads only without `edit_others_posts`) | `upload_files` |
+| `upload-media` | Sideload a file into the Media Library from a URL or base64 (site upload limit applies); returns image dimensions and the generated smaller sizes | `upload_files` |
+| `list-media` | Search the Media Library; results include URLs, image dimensions, and generated sizes (own uploads only without `edit_others_posts`) | `upload_files` |
 
 Writing canvas content is writing unsanitized same-origin HTML/JS, so it demands the capability WordPress already reserves for exactly that: `unfiltered_html`. In practice that means **Editor or Administrator on a single site, super admins only on multisite**, and no one when `DISALLOW_UNFILTERED_HTML` is defined. The MCP endpoint itself requires `edit_posts`, so Subscribers can't even list the tools.
 
-The tool contract has no path parameters at all — files are addressed by post ID plus a fixed enum, so the agent cannot write anywhere else on the filesystem. Permanently deleting a canvas post removes its file set; uninstalling the plugin removes all of them.
+The tool contract has no path parameters at all — files are addressed by post ID plus a fixed enum, so the agent cannot write anywhere else on the filesystem. Permanently deleting a canvas post removes its file set (retained previous versions included); uninstalling the plugin removes all of them.
+
+### Rollback semantics
+
+- Every `write-file` whose contents differ from the current file retains the outgoing version as that file's **single previous version** (`.{filename}.prev` alongside the live file). An identical write doesn't consume the slot.
+- `rollback-file` **swaps** current and previous, so it is its own undo: roll back to inspect, roll back again to return. The swap replaces the live file via `rename()`, so visitors never see a missing asset mid-swap.
+- One slot per file means undo reaches back exactly one write per file; deeper history is deliberately out of scope (see [Not in v1](#not-in-v1-on-purpose)).
+- A file that has never been overwritten has no previous version; `rollback-file` returns a clear error rather than guessing.
+- Rollback purges the same page caches a write does and fires the same `ai_canvas_after_write` action.
+
+### Media dimensions
+
+`upload-media` and `list-media` return each image's pixel dimensions plus every generated intermediate size (name, URL, width, height). That exists so agents can reference a right-sized variant with explicit `width`/`height` attributes instead of dropping a full-size original into a 600px column — the single most common way AI-built pages balloon. The [vibe skill](#the-companion-claude-code-plugin) instructs agents to use it that way.
 
 ## How rendering works
 
 - The plugin registers two block templates: "AI Canvas" (`ai-canvas//canvas`) — the theme's header template part, an internal dynamic block that echoes `index.html`, the footer template part — and "AI Canvas (Blank)" (`ai-canvas//canvas-blank`), which is just the canvas block, so the canvas controls the whole page (`wp_head`/`wp_footer` still fire, so the CSS/JS enqueues work). Both show up in the editor's Template panel like any other template.
 - In wp-admin, canvas pages don't present a blank editor: a pinned notice plus a locked "AI-controlled canvas" placeholder card explain that the content lives in the file set and is edited through the connected agent.
-- `style.css` and `script.js` are enqueued on canvas pages with `filemtime()` cache-busting.
+- `style.css` and `script.js` are enqueued on canvas pages with `filemtime()` cache-busting, so an agent's write (or rollback) is visible on the next reload.
 - `index.html` is read server-side and never web-served; only the CSS/JS need to be publicly readable from `uploads/`.
-- After each write the plugin bumps the page's Batcache version key and purges Pressable's edge cache when present, and fires `ai_canvas_after_write` for anything host-specific.
+- After each write or rollback the plugin bumps the page's Batcache version key and purges Pressable's edge cache when present, and fires `ai_canvas_after_write` for anything host-specific.
 
 ## Not in v1 (on purpose)
 
 Output sanitization, draft/preview, write history beyond the single per-file rollback slot, classic themes, an embedded chat UI, settings screens.
+
+## Changelog
+
+### 0.2.0
+
+- `rollback-file` tool: every write retains one previous version per file; rollback swaps it live and is its own undo. Cleanup on post deletion and uninstall covers the retained versions.
+- `upload-media` / `list-media` now return image pixel dimensions and all generated intermediate sizes, so agents can reference right-sized variants.
+
+### 0.1.0
+
+- Initial release: canvas templates, file jail, MCP endpoint, Media Library tools, cache purging, editor lockout card.

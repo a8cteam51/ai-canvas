@@ -179,7 +179,7 @@ class AI_Canvas_Abilities {
 			'ai-canvas/upload-media',
 			array(
 				'label'               => __( 'Upload media', 'ai-canvas' ),
-				'description'         => __( 'Add a file to the Media Library from a URL or base64 data, and get back the attachment URL to reference from canvas HTML/CSS.', 'ai-canvas' ),
+				'description'         => __( 'Add a file to the Media Library from a URL or base64 data, and get back the attachment URL to reference from canvas HTML/CSS. For images, the result includes pixel dimensions and the generated smaller sizes — reference the smallest size that covers the display area, and mirror its width/height in the HTML.', 'ai-canvas' ),
 				'category'            => 'ai-canvas',
 				'input_schema'        => array(
 					'type'       => 'object',
@@ -198,14 +198,7 @@ class AI_Canvas_Abilities {
 						'alt'      => array( 'type' => 'string' ),
 					),
 				),
-				'output_schema'       => array(
-					'type'       => 'object',
-					'properties' => array(
-						'attachment_id' => array( 'type' => 'integer' ),
-						'url'           => array( 'type' => 'string' ),
-						'mime'          => array( 'type' => 'string' ),
-					),
-				),
+				'output_schema'       => self::attachment_schema(),
 				'permission_callback' => fn() => current_user_can( 'upload_files' ),
 				'execute_callback'    => array( __CLASS__, 'upload_media' ),
 				'meta'                => self::meta(),
@@ -216,7 +209,7 @@ class AI_Canvas_Abilities {
 			'ai-canvas/list-media',
 			array(
 				'label'               => __( 'List media', 'ai-canvas' ),
-				'description'         => __( 'Search the Media Library and get attachment URLs to reference from canvas HTML/CSS.', 'ai-canvas' ),
+				'description'         => __( 'Search the Media Library and get attachment URLs to reference from canvas HTML/CSS. Image results include pixel dimensions and the generated smaller sizes — reference the smallest size that covers the display area, and mirror its width/height in the HTML.', 'ai-canvas' ),
 				'category'            => 'ai-canvas',
 				'input_schema'        => array(
 					'type'       => 'object',
@@ -234,16 +227,7 @@ class AI_Canvas_Abilities {
 					'properties' => array(
 						'media' => array(
 							'type'  => 'array',
-							'items' => array(
-								'type'       => 'object',
-								'properties' => array(
-									'attachment_id' => array( 'type' => 'integer' ),
-									'url'           => array( 'type' => 'string' ),
-									'mime'          => array( 'type' => 'string' ),
-									'title'         => array( 'type' => 'string' ),
-									'alt'           => array( 'type' => 'string' ),
-								),
-							),
+							'items' => self::attachment_schema(),
 						),
 					),
 				),
@@ -264,6 +248,33 @@ class AI_Canvas_Abilities {
 				'file'    => array(
 					'type' => 'string',
 					'enum' => array( 'html', 'css', 'js' ),
+				),
+			),
+		);
+	}
+
+	private static function attachment_schema(): array {
+		return array(
+			'type'       => 'object',
+			'properties' => array(
+				'attachment_id' => array( 'type' => 'integer' ),
+				'url'           => array( 'type' => 'string' ),
+				'mime'          => array( 'type' => 'string' ),
+				'title'         => array( 'type' => 'string' ),
+				'alt'           => array( 'type' => 'string' ),
+				'width'         => array( 'type' => array( 'integer', 'null' ) ),
+				'height'        => array( 'type' => array( 'integer', 'null' ) ),
+				'sizes'         => array(
+					'type'  => 'array',
+					'items' => array(
+						'type'       => 'object',
+						'properties' => array(
+							'name'   => array( 'type' => 'string' ),
+							'url'    => array( 'type' => 'string' ),
+							'width'  => array( 'type' => 'integer' ),
+							'height' => array( 'type' => 'integer' ),
+						),
+					),
 				),
 			),
 		);
@@ -446,11 +457,7 @@ class AI_Canvas_Abilities {
 			update_post_meta( $attachment_id, '_wp_attachment_image_alt', sanitize_text_field( $input['alt'] ) );
 		}
 
-		return array(
-			'attachment_id' => $attachment_id,
-			'url'           => wp_get_attachment_url( $attachment_id ),
-			'mime'          => get_post_mime_type( $attachment_id ),
-		);
+		return self::describe_attachment( $attachment_id );
 	}
 
 	public static function list_media( $input = array() ) {
@@ -468,16 +475,39 @@ class AI_Canvas_Abilities {
 		$attachments = get_posts( $args );
 
 		return array(
-			'media' => array_map(
-				fn( $att ) => array(
-					'attachment_id' => $att->ID,
-					'url'           => wp_get_attachment_url( $att->ID ),
-					'mime'          => $att->post_mime_type,
-					'title'         => $att->post_title,
-					'alt'           => (string) get_post_meta( $att->ID, '_wp_attachment_image_alt', true ),
-				),
-				$attachments
-			),
+			'media' => array_map( fn( $att ) => self::describe_attachment( $att->ID ), $attachments ),
+		);
+	}
+
+	/**
+	 * Attachment shape shared by upload-media and list-media. Dimensions and
+	 * generated sizes exist so agents can reference a right-sized variant with
+	 * explicit width/height instead of the full-size original.
+	 */
+	private static function describe_attachment( int $attachment_id ): array {
+		$meta  = wp_get_attachment_metadata( $attachment_id );
+		$sizes = array();
+		foreach ( array_keys( $meta['sizes'] ?? array() ) as $size ) {
+			$src = wp_get_attachment_image_src( $attachment_id, $size );
+			if ( $src ) {
+				$sizes[] = array(
+					'name'   => $size,
+					'url'    => $src[0],
+					'width'  => (int) $src[1],
+					'height' => (int) $src[2],
+				);
+			}
+		}
+
+		return array(
+			'attachment_id' => $attachment_id,
+			'url'           => wp_get_attachment_url( $attachment_id ),
+			'mime'          => (string) get_post_mime_type( $attachment_id ),
+			'title'         => get_the_title( $attachment_id ),
+			'alt'           => (string) get_post_meta( $attachment_id, '_wp_attachment_image_alt', true ),
+			'width'         => isset( $meta['width'] ) ? (int) $meta['width'] : null,
+			'height'        => isset( $meta['height'] ) ? (int) $meta['height'] : null,
+			'sizes'         => $sizes,
 		);
 	}
 
