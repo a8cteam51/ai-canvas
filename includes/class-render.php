@@ -119,14 +119,16 @@ class AI_Canvas_Render {
 			return;
 		}
 
-		$css = AI_Canvas_Files::path( $post_id, 'css' );
-		if ( ! is_wp_error( $css ) && file_exists( $css ) ) {
-			wp_enqueue_style( 'ai-canvas-' . $post_id, AI_Canvas_Files::url( $post_id, 'css' ), array(), (string) filemtime( $css ) );
+		// mtimes() reaches the filesystem through WP_Filesystem and returns null
+		// for a file that isn't there, so it doubles as the existence check.
+		$mtimes = AI_Canvas_Files::mtimes( $post_id );
+
+		if ( null !== $mtimes['css'] ) {
+			wp_enqueue_style( 'ai-canvas-' . $post_id, AI_Canvas_Files::url( $post_id, 'css' ), array(), (string) $mtimes['css'] );
 		}
 
-		$js = AI_Canvas_Files::path( $post_id, 'js' );
-		if ( ! is_wp_error( $js ) && file_exists( $js ) ) {
-			wp_enqueue_script( 'ai-canvas-' . $post_id, AI_Canvas_Files::url( $post_id, 'js' ), array(), (string) filemtime( $js ), array( 'in_footer' => true ) );
+		if ( null !== $mtimes['js'] ) {
+			wp_enqueue_script( 'ai-canvas-' . $post_id, AI_Canvas_Files::url( $post_id, 'js' ), array(), (string) $mtimes['js'], array( 'in_footer' => true ) );
 		}
 	}
 }

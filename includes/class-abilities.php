@@ -426,8 +426,12 @@ class AI_Canvas_Abilities {
 			if ( is_wp_error( $tmp ) ) {
 				return $tmp;
 			}
-			if ( filesize( $tmp ) > $max_bytes ) {
-				@unlink( $tmp );
+			// download_url() writes the temp file itself; wp_filesize()/
+			// wp_delete_file() are the core-owned accessors for it, and unlike
+			// WP_Filesystem they stay correct when the temp dir sits outside
+			// the filesystem abstraction's root.
+			if ( wp_filesize( $tmp ) > $max_bytes ) {
+				wp_delete_file( $tmp );
 				return new WP_Error( 'ai_canvas_too_large', sprintf( 'Download exceeds the %d byte upload limit.', $max_bytes ) );
 			}
 			$name = $input['filename'] ?? basename( (string) wp_parse_url( $input['url'], PHP_URL_PATH ) );
@@ -446,7 +450,18 @@ class AI_Canvas_Abilities {
 			}
 			$name = sanitize_file_name( $input['filename'] );
 			$tmp  = wp_tempnam( $name );
-			if ( ! $tmp || false === file_put_contents( $tmp, $contents ) ) {
+			if ( ! $tmp ) {
+				return new WP_Error( 'ai_canvas_tmp_failed', 'Could not stage the upload.' );
+			}
+			$fs = AI_Canvas_Files::filesystem();
+			if ( is_wp_error( $fs ) ) {
+				wp_delete_file( $tmp );
+				return $fs;
+			}
+			// wp_tempnam() has already created the (empty) file; this only
+			// fills it, via the same abstraction every other write here uses.
+			if ( ! $fs->put_contents( $tmp, $contents, FS_CHMOD_FILE ) ) {
+				wp_delete_file( $tmp );
 				return new WP_Error( 'ai_canvas_tmp_failed', 'Could not stage the upload.' );
 			}
 		} else {
@@ -462,7 +477,7 @@ class AI_Canvas_Abilities {
 			$input['title'] ?? null
 		);
 		if ( is_wp_error( $attachment_id ) ) {
-			@unlink( $tmp );
+			wp_delete_file( $tmp );
 			return $attachment_id;
 		}
 
